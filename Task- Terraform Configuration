@@ -1,0 +1,115 @@
+provider "aws" {
+  region = "us-east-1"
+}
+
+terraform {
+  backend "s3" {
+    bucket = "terraform-state-bucket"
+    key    = "terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+resource "aws_vpc" "my_vpc" {
+  cidr_block = "10.0.0.0/16"
+}
+
+resource "aws_subnet" "public_subnet" {
+  vpc_id            = aws_vpc.my_vpc.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "us-east-1a"
+
+  tags = {
+    Name = "Public Subnet"
+  }
+}
+
+resource "aws_subnet" "private_subnet" {
+  vpc_id            = aws_vpc.my_vpc.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1a"
+
+  tags = {
+    Name = "Private Subnet"
+  }
+}
+
+resource "aws_nat_gateway" "my_nat_gateway" {
+  allocation_id = aws_eip.my_eip.id
+  subnet_id     = aws_subnet.public_subnet.id
+
+  depends_on = [aws_internet_gateway.my_igw]
+}
+
+resource "aws_eip" "my_eip" {
+  vpc = true
+}
+
+resource "aws_internet_gateway" "my_igw" {
+  vpc_id = aws_vpc.my_vpc.id
+}
+
+resource "aws_launch_configuration" "my_launch_config" {
+  name_prefix   = "my-launch-config"
+  image_id      = "ami-0c55b159cbfafe1f0"
+  instance_type = "t2.medium"
+  security_groups = [
+    aws_security_group.my_sg.id,
+  ]
+
+  user_data = <<-EOF
+              #!/bin/bash
+              echo "Hello, World!" > index.html
+              nohup python -m SimpleHTTPServer 80 &
+              EOF
+}
+
+resource "aws_security_group" "my_sg" {
+  name_prefix = "my-security-group"
+  vpc_id      = aws_vpc.my_vpc.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_autoscaling_group" "my_asg" {
+  name                 = "my-autoscaling-group"
+  launch_configuration = aws_launch_configuration.my_launch_config.name
+  max_size             = 5
+  min_size             = 2
+  vpc_zone_identifier  = [aws_subnet.private_subnet.id]
+
+  tag {
+    key                 = "Name"
+    value               = "my-asg-instance"
+    propagate_at_launch = true
+  }
+
+  lifecycle {
+    ignore_changes = [
+      "tag",
+    ]
+  }
+
+  metric {
+    name                 = "CPUUtilization"
+    namespace            = "AWS/EC2"
+    statistic            = "Average"
+    unit                 = "Percent"
+    period               = 60
+    evaluation_periods   = 2
+    threshold            = 45
+    comparison_operator  = "GreaterThanOrEqualToThreshold"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "my_cpu_alarm" {
+  alarm_name          = "my-cpu-alarm"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+}
