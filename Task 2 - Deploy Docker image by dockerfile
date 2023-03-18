@@ -1,0 +1,89 @@
+#Dockerfile
+
+FROM nginx
+COPY hello.txt /var/www/
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+#GitHub CI/CD Pipeline YAML File
+
+name: deploy-to-ec2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        push: false
+        tags: my-nginx:latest
+
+    - name: Login to AWS ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Tag Docker image
+      id: tag-image
+      run: echo "::set-output name=image::$ECR_REGISTRY/my-nginx:$GITHUB_SHA"
+
+    - name: Push Docker image to ECR
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.tag-image.outputs.image }}
+
+    - name: Install Docker on EC2 instance
+      uses: appleboy/ssh-action@v0.18.0
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        password: ${{ secrets.EC2_PASSWORD }}
+        script: |
+          sudo apt-get update
+          sudo apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+          sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+          sudo apt-get update
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+          sudo usermod -aG docker $USER
+
+    - name: Copy Docker image to EC2 instance
+      uses: appleboy/scp-action@master
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        password: ${{ secrets.EC2_PASSWORD }}
+        source: ./${{ steps.tag-image.outputs.image }}
+        target: /tmp/
+
+    - name: Load Docker image on EC2 instance
+      uses: appleboy/ssh-action@v0.18.0
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        password: ${{ secrets.EC2_PASSWORD }}
+        script: |
+          sudo docker load -i /tmp/my-nginx_latest.tar
+
+    - name: Run Docker container on EC2 instance
+      uses: appleboy/ssh-action@v0.18.0
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        password: ${{ secrets.EC2_PASSWORD }}
+        script: |
+          sudo docker run -d --name my-nginx -p 80:80 $ECR_REGISTRY/my-nginx:$GITHUB_SHA
